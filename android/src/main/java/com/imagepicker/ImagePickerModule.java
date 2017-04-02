@@ -42,6 +42,13 @@ import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.bridge.WritableNativeArray;
 import com.facebook.react.bridge.WritableNativeMap;
 
+import dagger.ObjectGraph;
+import com.github.hiteshsondhi88.libffmpeg.ExecuteBinaryResponseHandler;
+import com.github.hiteshsondhi88.libffmpeg.FFmpeg;
+import com.github.hiteshsondhi88.libffmpeg.LoadBinaryResponseHandler;
+import com.github.hiteshsondhi88.libffmpeg.exceptions.FFmpegCommandAlreadyRunningException;
+import com.github.hiteshsondhi88.libffmpeg.exceptions.FFmpegNotSupportedException;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -50,6 +57,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.text.DecimalFormat;
 import java.text.ParsePosition;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -58,13 +66,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-//compress
-import com.netcompss.ffmpeg4android.CommandValidationException;
-import com.netcompss.ffmpeg4android.GeneralUtils;
-import com.netcompss.ffmpeg4android.Prefs;
-import com.netcompss.ffmpeg4android.ProgressCalculator;
-import com.netcompss.loader.LoadJNI;
+import javax.inject.Inject;
 
 public class ImagePickerModule extends ReactContextBaseJavaModule implements ActivityEventListener {
 
@@ -99,14 +104,11 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
 
   //compress
   public ProgressDialog progressBar;
-  String workFolder = null;
-  String demoVideoFolder = null;
-  String demoVideoPath = null;
-  String vkLogPath = null;
-  LoadJNI vk;
-  private final int STOP_TRANSCODING_MSG = -1;
-  private final int FINISHED_TRANSCODING_MSG = 0;
-  private boolean commandValidationFailedFlag = false;
+  @Inject
+  FFmpeg ffmpeg;
+
+  private String newFilePath = "";
+  private double videoDuration = 0;
   //////////////////////////////
 
   public ImagePickerModule(ReactApplicationContext reactContext) {
@@ -115,6 +117,42 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     reactContext.addActivityEventListener(this);
 
     mReactContext = reactContext;
+    ObjectGraph.create(new DaggerDependencyModule(mReactContext)).inject(this);
+    loadFFMpegBinary();
+    initUI();
+  }
+
+  private void initUI() {
+
+  }
+
+  private void loadFFMpegBinary() {
+    try {
+      ffmpeg.loadBinary(new LoadBinaryResponseHandler() {
+        @Override
+        public void onFailure() {
+          showUnsupportedExceptionDialog();
+        }
+      });
+    } catch (FFmpegNotSupportedException e) {
+      showUnsupportedExceptionDialog();
+    }
+  }
+
+  private void showUnsupportedExceptionDialog() {
+    /*new AlertDialog.Builder(mReactContext)
+            .setIcon(android.R.drawable.ic_dialog_alert)
+            .setTitle(getString(R.string.device_not_supported))
+            .setMessage(getString(R.string.device_not_supported_message))
+            .setCancelable(false)
+            .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+              @Override
+              public void onClick(DialogInterface dialog, int which) {
+                mReactContext.this.finish();
+              }
+            })
+            .create()
+            .show();*/
   }
 
   @Override
@@ -514,17 +552,6 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
         mCallback.invoke(response);
         return;
       case REQUEST_LAUNCH_VIDEO_LIBRARY:
-        //compress
-        workFolder = currentActivity.getFilesDir() + "/";
-        //Log.i(Prefs.TAG, "workFolder: " + workFolder);
-        vkLogPath = workFolder + "vk.log";
-        GeneralUtils.copyLicenseFromAssetsToSDIfNeeded(currentActivity, workFolder);
-        ///////GeneralUtils.copyDemoVideoFromAssetsToSDIfNeeded(currentActivity, demoVideoFolder);
-        int rc = GeneralUtils.isLicenseValid(currentActivity, workFolder);
-        Log.i(Prefs.TAG, "License check RC: " + rc);
-        //
-
-
         if(checkFileSize(getRealPathFromURI(data.getData()))) {
           //compress this video
           runTranscoding(data);
@@ -535,16 +562,6 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
         mCallback.invoke(response);
         return;
       case REQUEST_LAUNCH_VIDEO_CAPTURE:
-        //compress
-        workFolder = currentActivity.getFilesDir() + "/";
-        //Log.i(Prefs.TAG, "workFolder: " + workFolder);
-        vkLogPath = workFolder + "vk.log";
-        GeneralUtils.copyLicenseFromAssetsToSDIfNeeded(currentActivity, workFolder);
-        ///////GeneralUtils.copyDemoVideoFromAssetsToSDIfNeeded(currentActivity, demoVideoFolder);
-        rc = GeneralUtils.isLicenseValid(currentActivity, workFolder);
-        Log.i(Prefs.TAG, "License check RC: " + rc);
-        //
-
         if(checkFileSize(getRealPathFromURI(data.getData()))) {
           //compress this video
           runTranscoding(data);
@@ -897,155 +914,123 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     return mediaFile;
   }
 
-  //compress function
-  private void runTranscodingUsingLoader(final Intent data) {
-    Log.i(Prefs.TAG, "runTranscodingUsingLoader started...");
+  private static Pattern pattern = Pattern.compile("(\\d{2}):(\\d{2}):(\\d{2}).(\\d{3})");
 
-    PowerManager powerManager = (PowerManager)currentActivity.getSystemService(Activity.POWER_SERVICE);
-    PowerManager.WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VK_LOCK");
-    Log.d(Prefs.TAG, "Acquire wake lock");
-    wakeLock.acquire();
-
-    MediaMetadataRetriever metaRetriever = new MediaMetadataRetriever();
-    metaRetriever.setDataSource(getRealPathFromURI(data.getData()));
-    int height = Integer.parseInt(metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT))/2;
-    int width = Integer.parseInt(metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH))/2;
-
-    String deviceResolution = ("" + width) + "x" + ("" + height);
-
-    final String newPath = getRealPathFromURI(data.getData()).split(".mp")[0] + "_compress.mp4";
-
-    String[] complexCommand = {"ffmpeg", "-y", "-i", getRealPathFromURI(data.getData()), "-strict", "experimental", "-s", deviceResolution, "-r", "25", "-vcodec", "mpeg4", "-b", "900k", "-ab", "48000", "-ac", "2", "-ar", "22050", newPath};
-
-    vk = new LoadJNI();
-    try {
-      // running complex command with validation
-      vk.run(complexCommand, workFolder, currentActivity);
-
-      Log.i(Prefs.TAG, "vk.run finished.");
-      // copying vk.log (internal native log) to the videokit folder
-      GeneralUtils.copyFileToFolder(vkLogPath, demoVideoFolder);
-
-    } catch (CommandValidationException e) {
-      Log.e(Prefs.TAG, "vk run exeption.", e);
-      commandValidationFailedFlag = true;
-
-    } catch (Throwable e) {
-      Log.e(Prefs.TAG, "vk run exeption.", e);
+  public static long dateParseRegExp(String period) {
+    Matcher matcher = pattern.matcher(period);
+    if (matcher.matches()) {
+      return Long.parseLong(matcher.group(1)) * 3600000L
+              + Long.parseLong(matcher.group(2)) * 60000
+              + Long.parseLong(matcher.group(3)) * 1000
+              + Long.parseLong(matcher.group(4));
+    } else {
+      throw new IllegalArgumentException("Invalid format " + period);
     }
-    finally {
-      if (wakeLock.isHeld()) {
-        wakeLock.release();
-        Log.i(Prefs.TAG, "Wake lock released");
-      }
-      else{
-        Log.i(Prefs.TAG, "Wake lock is already released, doing nothing");
-      }
-    }
-
-    // finished Toast
-    String rc = null;
-    if (commandValidationFailedFlag) {
-      rc = "Command Vaidation Failed";
-    }
-    else {
-      rc = GeneralUtils.getReturnCodeFromLog(vkLogPath);
-    }
-    final String status = rc;
-    currentActivity.runOnUiThread(new Runnable() {
-      public void run() {
-
-        if (status.equals("Transcoding Status: Finished OK")) {
-          Toast.makeText(currentActivity, "压缩成功", Toast.LENGTH_LONG).show();
-          response.putString("uri", data.getData().toString());
-          response.putString("path", newPath);//
-          mCallback.invoke(response);
-        }
-        else if(status.equals("Transcoding Status: Stopped")) {
-          Toast.makeText(currentActivity, "压缩被终止", Toast.LENGTH_LONG).show();
-        }
-        // (status.equals("Transcoding Status: Failed"))
-        else {
-          //Toast.makeText(currentActivity, "Check: " + vkLogPath + " for more information.", Toast.LENGTH_LONG).show();
-          Toast.makeText(currentActivity, "压缩失败", Toast.LENGTH_LONG).show();
-        }
-      }
-    });
   }
 
-  private Handler handler = new Handler(Looper.getMainLooper()) {
-    @Override
-    public void handleMessage(Message msg) {
-      Log.i(Prefs.TAG, "Handler got message");
-      if (progressBar != null) {
-        progressBar.dismiss();
+  private void addTextViewToLayout(String text) {
 
-        // stopping the transcoding native
-        if (msg.what == STOP_TRANSCODING_MSG) {
-          Log.i(Prefs.TAG, "Got cancel message, calling fexit");
-          vk.fExit(currentActivity);
+  }
+
+  private void execFFmpegBinary(final String[] command, final Intent imageReturnedIntent) {
+    try {
+      ffmpeg.execute(command, new ExecuteBinaryResponseHandler() {
+        @Override
+        public void onFailure(String s) {
+          addTextViewToLayout("FAILED with output : "+s);
         }
-      }
-    }
-  };
 
-  public void runTranscoding(final Intent data) {
+        @Override
+        public void onSuccess(String s) {
+          addTextViewToLayout("SUCCESS with output : "+s);
+        }
+        @Override
+        public void onProgress(String s) {
+          addTextViewToLayout("progress : "+s);
+          if(s.contains("time="))
+          {
+            if(s.contains("bitrate="))
+            {
+              int timeIndex = s.indexOf("time=");
+              int bitrateIndex = s.indexOf("bitrate=");
+              String timeResult = s.substring(timeIndex + 5, bitrateIndex).replace(" ", "");
+              while(timeResult.length() < 12)
+              {
+                timeResult += "0";
+              }
+              double dualTime = (double)dateParseRegExp(timeResult);
+              double dProgress = dualTime/videoDuration;
+
+              DecimalFormat df = new DecimalFormat("######0.00");
+              dProgress = Double.valueOf(df.format(dProgress));
+              if ((int)(dProgress*100) != 0 && (int)(dProgress*100) < 100) {
+                progressBar.setProgress((int)(dProgress*100));
+              }
+            }
+            else
+            {
+              //progressDialog.setMessage("wrongwrongwrongwrong\n"+s);
+            }
+          }
+          else
+          {
+            //progressDialog.setMessage("处理中1\n"+s);
+          }
+
+        }
+
+        @Override
+        public void onStart() {
+
+        }
+
+        @Override
+        public void onFinish() {
+          progressBar.dismiss();
+          Toast.makeText(currentActivity, "压缩成功", Toast.LENGTH_LONG).show();
+          response.putString("uri", imageReturnedIntent.getData().toString());
+          response.putString("path", newFilePath);//
+          mCallback.invoke(response);
+        }
+      });
+    } catch (FFmpegCommandAlreadyRunningException e) {
+      // do nothing for now
+    }
+  }
+
+  public void runTranscoding(final Intent imageReturnedIntent) {
     progressBar = new ProgressDialog(currentActivity);
     progressBar.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
     progressBar.setTitle("视频压缩");
     progressBar.setMessage("待上传视频过大,正在压缩...");
     progressBar.setMax(100);
     progressBar.setProgress(0);
-
     progressBar.setCancelable(false);
+
     progressBar.setButton(DialogInterface.BUTTON_NEGATIVE, "取消", new DialogInterface.OnClickListener() {
       @Override
       public void onClick(DialogInterface dialog, int which) {
-        handler.sendEmptyMessage(STOP_TRANSCODING_MSG);
+        ffmpeg.killRunningProcesses();
       }
     });
-
     progressBar.show();
+    MediaMetadataRetriever metaRetriever = new MediaMetadataRetriever();
+    metaRetriever.setDataSource(getRealPathFromURI(imageReturnedIntent.getData()));
+    Bitmap bmp = null;
+    bmp = metaRetriever.getFrameAtTime();
+    int videoHeight = bmp.getHeight();
+    int videoWidth = bmp.getWidth();
+    videoDuration = Long.valueOf(metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION));
+    //int width = Integer.parseInt(metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH))/2;
+    String deviceResolution = ("" + videoWidth) + "x" + ("" + videoHeight);
+    final String newPath = getRealPathFromURI(imageReturnedIntent.getData()).split(".mp")[0] + "_compress.mp4";
+    newFilePath = newPath;
+    String[] complexCommand = {"-y", "-i", getRealPathFromURI(imageReturnedIntent.getData()),
+            "-strict", "experimental", "-s", deviceResolution, "-r", "25", "-vcodec",
+            "mpeg4", "-b", "900k", "-ab", "48000", "-ac", "2", "-ar", "22050", newPath};
 
-    new Thread() {
-      public void run() {
-        Log.d(Prefs.TAG,"Worker started");
-        try {
-          //sleep(5000);
-          runTranscodingUsingLoader(data);
-          handler.sendEmptyMessage(FINISHED_TRANSCODING_MSG);
-
-        } catch(Exception e) {
-          Log.e("threadmessage",e.getMessage());
-        }
-      }
-    }.start();
-
-    // Progress update thread
-    new Thread() {
-      ProgressCalculator pc = new ProgressCalculator(vkLogPath);
-      public void run() {
-        Log.d(Prefs.TAG,"Progress update started");
-        int progress = -1;
-        try {
-          while (true) {
-            sleep(300);
-            progress = pc.calcProgress();
-            if (progress != 0 && progress < 100) {
-              progressBar.setProgress(progress);
-            }
-            else if (progress == 100) {
-              Log.i(Prefs.TAG, "==== progress is 100, exiting Progress update thread");
-              pc.initCalcParamsForNextInter();
-              break;
-            }
-          }
-
-        } catch(Exception e) {
-          Log.e("threadmessage",e.getMessage());
-        }
-      }
-    }.start();
+    String[] command = complexCommand;
+    execFFmpegBinary(command, imageReturnedIntent);
   }
 
   public void onNewIntent(Intent intent) { }
