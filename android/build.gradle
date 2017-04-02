@@ -40,7 +40,7 @@ repositories {
 }
 
 dependencies {
-    compile 'com.facebook.react:react-native:0.20.+'
+    compile 'com.facebook.react:react-native:+'
     compile files('libs/universal-image-loader-1.9.0.jar')
     compile project(':ffmpeg4android_lib')
 }
