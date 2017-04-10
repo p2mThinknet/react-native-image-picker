@@ -273,12 +273,15 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
 
     if (pickVideo == true) {
       requestCode = REQUEST_LAUNCH_VIDEO_CAPTURE;
-      /*File saveFolder = new File(Environment.getExternalStorageDirectory(), "jzfpvideopick");
-      if (!saveFolder.mkdirs())
-        throw new RuntimeException("Unable to create save directory, make sure WRITE_EXTERNAL_STORAGE permission is granted.");*/
+      File saveFolder = new File(Environment.getExternalStorageDirectory(), "jzfpvideopick");
+      if(!saveFolder.exists())
+      {
+        if (!saveFolder.mkdirs())
+          throw new RuntimeException("Unable to create save directory, make sure WRITE_EXTERNAL_STORAGE permission is granted.");
+      }
       mCallback = callback;
       new MaterialCamera(currentActivity)
-              //.saveDir(saveFolder)
+              .saveDir(saveFolder)
               .allowChangeCamera(true)
               .qualityProfile(MaterialCamera.QUALITY_HIGH)
               .showPortraitWarning(false)
