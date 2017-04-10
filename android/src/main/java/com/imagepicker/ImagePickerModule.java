@@ -29,6 +29,7 @@ import android.webkit.MimeTypeMap;
 import android.widget.ArrayAdapter;
 import android.widget.Toast;
 
+import com.afollestad.materialcamera.MaterialCamera;
 import com.facebook.react.bridge.ActivityEventListener;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Callback;
@@ -71,6 +72,8 @@ import java.util.regex.Pattern;
 
 import javax.inject.Inject;
 
+import static android.app.Activity.RESULT_OK;
+
 public class ImagePickerModule extends ReactContextBaseJavaModule implements ActivityEventListener {
 
   static final int REQUEST_LAUNCH_IMAGE_CAPTURE = 1;
@@ -109,6 +112,7 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
 
   private String newFilePath = "";
   private double videoDuration = 0;
+  private final static int CAMERA_RQ = 6969;
   //////////////////////////////
 
   public ImagePickerModule(ReactApplicationContext reactContext) {
@@ -280,15 +284,12 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
 
     if (pickVideo == true) {
       requestCode = REQUEST_LAUNCH_VIDEO_CAPTURE;
-      cameraIntent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
-      //firegnu
-        mVideoCaptureURI = getOutputMediaFileUri();
-        cameraIntent.putExtra(MediaStore.EXTRA_OUTPUT, mVideoCaptureURI);
-      //
-      cameraIntent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, videoQuality);
-      if (videoDurationLimit > 0) {
-        cameraIntent.putExtra(MediaStore.EXTRA_DURATION_LIMIT, videoDurationLimit);
-      }
+      mCallback = callback;
+      new MaterialCamera(currentActivity)
+              .qualityProfile(MaterialCamera.QUALITY_HIGH)
+              .showPortraitWarning(false)
+              .countdownMinutes(1.0f/3.0f)
+              .start(CAMERA_RQ);
     } else {
       requestCode = REQUEST_LAUNCH_IMAGE_CAPTURE;
       cameraIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
@@ -303,7 +304,7 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
         cameraIntent.putExtra("aspectX", aspectX);
         cameraIntent.putExtra("aspectY", aspectY);*/
       }
-    }
+
 
     if (cameraIntent.resolveActivity(mReactContext.getPackageManager()) == null) {
       response.putString("error", "Cannot launch camera");
@@ -320,6 +321,7 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
       response = Arguments.createMap();
       response.putString("error", "Cannot launch camera");
       callback.invoke(response);
+    }
     }
   }
 
@@ -468,6 +470,17 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     }
   }
 
+  private String readableFileSize(long size) {
+    if (size <= 0) return size + " B";
+    final String[] units = new String[]{"B", "KB", "MB", "GB", "TB"};
+    int digitGroups = (int) (Math.log10(size) / Math.log10(1024));
+    return new DecimalFormat("#,##0.##").format(size / Math.pow(1024, digitGroups)) + " " + units[digitGroups];
+  }
+
+  private String fileSize(File file) {
+    return readableFileSize(file.length());
+  }
+
   @Override
   //public void onActivityResult(final int requestCode, final int resultCode, final Intent data) {
   public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
@@ -479,9 +492,32 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     }*/
 
     response = Arguments.createMap();
-
+    if (requestCode == CAMERA_RQ) {
+      if (resultCode == RESULT_OK) {
+        final File file = new File(data.getData().getPath());
+        /*Toast.makeText(currentActivity, String.format("Saved to: %s, size: %s",
+                file.getAbsolutePath(), fileSize(file)), Toast.LENGTH_LONG).show();*/
+        //
+        if(checkFileSize(file.getAbsolutePath())) {
+          //compress this video
+          runTranscodingPickVideo(file.getAbsolutePath());
+          return;
+        }
+        response.putString("uri", "fileUri");
+        response.putString("path", file.getAbsolutePath());
+        mCallback.invoke(response);
+        return;
+        //
+      } else if (data != null) {
+        Exception e = (Exception) data.getSerializableExtra(MaterialCamera.ERROR_EXTRA);
+        if (e != null) {
+          e.printStackTrace();
+          Toast.makeText(currentActivity, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+      }
+    }
     // user cancel
-    if (resultCode != Activity.RESULT_OK) {
+    if (resultCode != RESULT_OK) {
       response.putBoolean("didCancel", true);
       mCallback.invoke(response);
       return;
@@ -562,13 +598,24 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
         mCallback.invoke(response);
         return;
       case REQUEST_LAUNCH_VIDEO_CAPTURE:
-        if(checkFileSize(getRealPathFromURI(data.getData()))) {
+        /*if(checkFileSize(getRealPathFromURI(data.getData()))) {
           //compress this video
           runTranscoding(data);
           return;
         }
         response.putString("uri", data.getData().toString());
         response.putString("path", getRealPathFromURI(data.getData()));
+        mCallback.invoke(response);*/
+        Toast.makeText(currentActivity,
+                data.getStringExtra("videoPickPath"), Toast.LENGTH_SHORT).show();
+        String videoPickPath = data.getStringExtra("videoPickPath");
+        if(checkFileSize(videoPickPath)) {
+          //compress this video
+          runTranscodingPickVideo(videoPickPath);
+          return;
+        }
+        response.putString("uri", "fileUri");
+        response.putString("path", videoPickPath);
         mCallback.invoke(response);
         return;
       default:
@@ -932,7 +979,7 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
 
   }
 
-  private void execFFmpegBinary(final String[] command, final Intent imageReturnedIntent) {
+  private void execFFmpegBinary(final String[] command) {
     try {
       ffmpeg.execute(command, new ExecuteBinaryResponseHandler() {
         @Override
@@ -988,7 +1035,8 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
         public void onFinish() {
           progressBar.dismiss();
           Toast.makeText(currentActivity, "压缩成功", Toast.LENGTH_LONG).show();
-          response.putString("uri", imageReturnedIntent.getData().toString());
+          //response.putString("uri", imageReturnedIntent.getData().toString());
+          response.putString("uri", "fileUri");
           response.putString("path", newFilePath);//
           mCallback.invoke(response);
         }
@@ -996,6 +1044,41 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     } catch (FFmpegCommandAlreadyRunningException e) {
       // do nothing for now
     }
+  }
+
+  public void runTranscodingPickVideo(final String pickVideoPath) {
+    progressBar = new ProgressDialog(currentActivity);
+    progressBar.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+    progressBar.setTitle("视频压缩");
+    progressBar.setMessage("待上传视频过大,正在压缩...");
+    progressBar.setMax(100);
+    progressBar.setProgress(0);
+    progressBar.setCancelable(false);
+
+    progressBar.setButton(DialogInterface.BUTTON_NEGATIVE, "取消", new DialogInterface.OnClickListener() {
+      @Override
+      public void onClick(DialogInterface dialog, int which) {
+        ffmpeg.killRunningProcesses();
+      }
+    });
+    progressBar.show();
+    MediaMetadataRetriever metaRetriever = new MediaMetadataRetriever();
+    metaRetriever.setDataSource(pickVideoPath);
+    Bitmap bmp = null;
+    bmp = metaRetriever.getFrameAtTime();
+    int videoHeight = bmp.getHeight();
+    int videoWidth = bmp.getWidth();
+    videoDuration = Long.valueOf(metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION));
+    //int width = Integer.parseInt(metaRetriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH))/2;
+    String deviceResolution = ("" + videoWidth) + "x" + ("" + videoHeight);
+    final String newPath = pickVideoPath.split(".mp")[0] + "_compress.mp4";
+    newFilePath = newPath;
+    String[] complexCommand = {"-y", "-i", pickVideoPath,
+            "-strict", "experimental", "-s", deviceResolution, "-r", "25", "-vcodec",
+            "mpeg4", "-b", "900k", "-ab", "48000", "-ac", "2", "-ar", "22050", newPath};
+
+    String[] command = complexCommand;
+    execFFmpegBinary(command);
   }
 
   public void runTranscoding(final Intent imageReturnedIntent) {
@@ -1030,7 +1113,7 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
             "mpeg4", "-b", "900k", "-ab", "48000", "-ac", "2", "-ar", "22050", newPath};
 
     String[] command = complexCommand;
-    execFFmpegBinary(command, imageReturnedIntent);
+    execFFmpegBinary(command);
   }
 
   public void onNewIntent(Intent intent) { }
