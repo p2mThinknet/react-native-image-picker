@@ -17,14 +17,9 @@ import android.media.ExifInterface;
 import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Environment;
-import android.os.Handler;
-import android.os.Looper;
-import android.os.Message;
-import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.support.v4.app.ActivityCompat;
 import android.util.Base64;
-import android.util.Log;
 import android.webkit.MimeTypeMap;
 import android.widget.ArrayAdapter;
 import android.widget.Toast;
@@ -42,8 +37,6 @@ import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.bridge.WritableNativeArray;
 import com.facebook.react.bridge.WritableNativeMap;
-
-import dagger.ObjectGraph;
 import com.github.hiteshsondhi88.libffmpeg.ExecuteBinaryResponseHandler;
 import com.github.hiteshsondhi88.libffmpeg.FFmpeg;
 import com.github.hiteshsondhi88.libffmpeg.LoadBinaryResponseHandler;
@@ -57,20 +50,17 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.text.DecimalFormat;
-import java.text.ParsePosition;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.List;
-import java.util.Locale;
-import java.util.TimeZone;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.inject.Inject;
+
+import dagger.ObjectGraph;
 
 import static android.app.Activity.RESULT_OK;
 
@@ -84,8 +74,7 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
   static final  int REQUEST_IMAGE_CROPPING = 5;
 
   private final ReactApplicationContext mReactContext;
-  //firegnu
-  private Uri mVideoCaptureURI;
+
   private Uri mCameraCaptureURI;
   private Uri mCropImagedUri;
   private Callback mCallback;
@@ -284,8 +273,13 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
 
     if (pickVideo == true) {
       requestCode = REQUEST_LAUNCH_VIDEO_CAPTURE;
+      File saveFolder = new File(Environment.getExternalStorageDirectory(), "jzfpvideopick");
+      if (!saveFolder.mkdirs())
+        throw new RuntimeException("Unable to create save directory, make sure WRITE_EXTERNAL_STORAGE permission is granted.");
       mCallback = callback;
       new MaterialCamera(currentActivity)
+              .saveDir(saveFolder)
+              .allowChangeCamera(true)
               .qualityProfile(MaterialCamera.QUALITY_HIGH)
               .showPortraitWarning(false)
               .countdownMinutes(1.0f/3.0f)
@@ -470,34 +464,13 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     }
   }
 
-  private String readableFileSize(long size) {
-    if (size <= 0) return size + " B";
-    final String[] units = new String[]{"B", "KB", "MB", "GB", "TB"};
-    int digitGroups = (int) (Math.log10(size) / Math.log10(1024));
-    return new DecimalFormat("#,##0.##").format(size / Math.pow(1024, digitGroups)) + " " + units[digitGroups];
-  }
-
-  private String fileSize(File file) {
-    return readableFileSize(file.length());
-  }
-
   @Override
-  //public void onActivityResult(final int requestCode, final int resultCode, final Intent data) {
   public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
-    //robustness code
-    /*if (mCallback == null || (mCameraCaptureURI == null && requestCode == REQUEST_LAUNCH_IMAGE_CAPTURE)
-            || (requestCode != REQUEST_LAUNCH_IMAGE_CAPTURE && requestCode != REQUEST_LAUNCH_IMAGE_LIBRARY
-            && requestCode != REQUEST_LAUNCH_VIDEO_LIBRARY && requestCode != REQUEST_LAUNCH_VIDEO_CAPTURE)) {
-      return;
-    }*/
 
     response = Arguments.createMap();
     if (requestCode == CAMERA_RQ) {
       if (resultCode == RESULT_OK) {
         final File file = new File(data.getData().getPath());
-        /*Toast.makeText(currentActivity, String.format("Saved to: %s, size: %s",
-                file.getAbsolutePath(), fileSize(file)), Toast.LENGTH_LONG).show();*/
-        //
         if(checkFileSize(file.getAbsolutePath())) {
           //compress this video
           runTranscodingPickVideo(file.getAbsolutePath());
@@ -623,42 +596,6 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     }
   }
 
-  /**
-   * Returns number of milliseconds since Jan. 1, 1970, midnight local time.
-   * Returns -1 if the date time information if not available.
-   * copied from ExifInterface.java
-   * @hide
-   */
-  private static long parseTimestamp(String dateTimeString, String subSecs) {
-    if (dateTimeString == null) return -1;
-
-    SimpleDateFormat sFormatter = new SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.getDefault());
-    sFormatter.setTimeZone(TimeZone.getTimeZone("UTC"));
-    ParsePosition pos = new ParsePosition(0);
-    try {
-      // The exif field is in local time. Parsing it as if it is UTC will yield time
-      // since 1/1/1970 local time
-      Date datetime = sFormatter.parse(dateTimeString, pos);
-      if (datetime == null) return -1;
-      long msecs = datetime.getTime();
-
-      if (subSecs != null) {
-        try {
-          long sub = Long.valueOf(subSecs);
-          while (sub > 1000) {
-            sub /= 10;
-          }
-          msecs += sub;
-        } catch (NumberFormatException e) {
-          //expected
-        }
-      }
-      return msecs;
-    } catch (IllegalArgumentException ex) {
-      return -1;
-    }
-  }
-
   private boolean permissionsCheck(Activity activity) {
     int writePermission = ActivityCompat.checkSelfPermission(activity, Manifest.permission.WRITE_EXTERNAL_STORAGE);
     int cameraPermission = ActivityCompat.checkSelfPermission(activity, Manifest.permission.CAMERA);
@@ -692,37 +629,6 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
       cursor.close();
     }
     return result;
-  }
-
-  /**
-   * Create a file from uri to allow image picking of image in disk cache
-   * (Exemple: facebook image, google image etc..)
-   *
-   * @doc =>
-   * https://github.com/nostra13/Android-Universal-Image-Loader#load--display-task-flow
-   *
-   * @param uri
-   * @return File
-   * @throws Exception
-   */
-  private File createFileFromURI(Uri uri) throws Exception {
-    File file = new File(mReactContext.getCacheDir(), "photo-" + uri.getLastPathSegment());
-    InputStream input = mReactContext.getContentResolver().openInputStream(uri);
-    OutputStream output = new FileOutputStream(file);
-
-    try {
-      byte[] buffer = new byte[4 * 1024];
-      int read;
-      while ((read = input.read(buffer)) != -1) {
-        output.write(buffer, 0, read);
-      }
-      output.flush();
-    } finally {
-      output.close();
-      input.close();
-    }
-
-    return file;
   }
 
   private String getBase64StringFromFile(String absoluteFilePath) {
@@ -920,45 +826,6 @@ public class ImagePickerModule extends ReactContextBaseJavaModule implements Act
     if (options.hasKey("durationLimit")) {
       videoDurationLimit = options.getInt("durationLimit");
     }
-  }
-
-
-  //firegnu:create video new file
-  /** Create a file Uri for saving an image or video */
-  private static Uri getOutputMediaFileUri(){
-
-    return Uri.fromFile(getOutputMediaFile());
-  }
-
-  /** Create a File for saving an image or video */
-  private static File getOutputMediaFile(){
-
-    // Check that the SDCard is mounted
-    File mediaStorageDir = new File(Environment.getExternalStoragePublicDirectory(
-            Environment.DIRECTORY_PICTURES), "MyCameraVideo");
-
-    // Create the storage directory(MyCameraVideo) if it does not exist
-    if (! mediaStorageDir.exists()){
-
-      if (! mediaStorageDir.mkdirs()){
-        return null;
-      }
-    }
-
-
-    // Create a media file name
-
-    // For unique file name appending current timeStamp with file name
-    java.util.Date date= new java.util.Date();
-    String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss")
-            .format(date.getTime());
-
-    File mediaFile;
-      // For unique video file name appending current timeStamp with file name
-    mediaFile = new File(mediaStorageDir.getPath() + File.separator +
-              "VID_"+ timeStamp + ".mp4");
-
-    return mediaFile;
   }
 
   private static Pattern pattern = Pattern.compile("(\\d{2}):(\\d{2}):(\\d{2}).(\\d{3})");
